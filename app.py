@@ -79,6 +79,11 @@ CAT_HALF_HEIGHT = 0.5
 CAT_PITCH = (2 * CAT_HALF_HEIGHT) / 3  # lane spacing = band height / 3
 CAT_FILL_ALPHA = 0.8
 
+# Category lane labels are spread over this fraction of the panel
+# height (centered), so the top and bottom labels keep clear of the
+# panels above and below.
+LABEL_SPREAD = 0.7
+
 SAMPLES = {
     "Messy plants (100 rows, planted errors)": "messy_plants.csv",
     "Iris (150 rows)": "iris.csv",
@@ -254,18 +259,22 @@ def add_categorical_panel(
     range_pad = max(0.05, (len(categories) + 2.1 - content_span) / 2)
     axis_lo = -CAT_HALF_HEIGHT - range_pad
     axis_hi = (len(categories) - 1) * CAT_PITCH + CAT_HALF_HEIGHT + range_pad
-    # Lane labels are spread evenly over the panel's full height
+    # Lane labels are spread over the middle of the panel's height
     # instead of sitting at the (compressed) lane centers, where
     # they'd print on top of each other; top-to-bottom order still
-    # matches the bands. With many categories, label every Nth one
-    # and leave the rest to hover, which shows the full value.
+    # matches the bands. They use the middle LABEL_SPREAD of the
+    # range so the end labels stay clear of the neighbouring panels.
+    # With many categories, label every Nth one and leave the rest
+    # to hover, which shows the full value.
+    label_lo = axis_lo + (1 - LABEL_SPREAD) / 2 * (axis_hi - axis_lo)
+    label_hi = axis_hi - (1 - LABEL_SPREAD) / 2 * (axis_hi - axis_lo)
     if len(categories) > 1:
         label_positions = [
-            axis_lo + i * (axis_hi - axis_lo) / (len(categories) - 1) for i in range(len(categories))
+            label_lo + i * (label_hi - label_lo) / (len(categories) - 1) for i in range(len(categories))
         ]
     else:
         label_positions = [(axis_lo + axis_hi) / 2]
-    label_stride = max(1, math.ceil(13 * max(len(categories) - 1, 1) / PANEL_PX))
+    label_stride = max(1, math.ceil(13 * max(len(categories) - 1, 1) / (LABEL_SPREAD * PANEL_PX)))
     shown = range(0, len(categories), label_stride)
     fig.update_yaxes(
         tickvals=[label_positions[i] for i in shown],
@@ -361,10 +370,25 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
             palette = PALETTE_FAMILIES[cat_number % len(PALETTE_FAMILIES)]
             cat_number += 1
         add_panel(fig, i, df[name], kind, x_all, palette)
-        # Variable names label the left side (the y-axis title), not the
-        # top of each panel. Text plots get a hint that y is length.
+        # Variable names are horizontal label chips pinned to each
+        # panel's top-left corner. (Plotly y-axis titles are always
+        # rotated vertical, and at this panel height neighbouring
+        # titles print into each other; a chip in axis-domain
+        # coordinates stays put during pan/zoom and costs no height.)
         label = f"{name} (length)" if kind == "text" else name
-        fig.update_yaxes(title_text=label, row=i, col=1)
+        fig.add_annotation(
+            xref=f"{_axis_ref('x', i)} domain",
+            yref=f"{_axis_ref('y', i)} domain",
+            x=0.004,
+            y=0.97,
+            xanchor="left",
+            yanchor="top",
+            text=truncate_label(label, 48),
+            showarrow=False,
+            font={"size": 11, "color": "#e5e7eb"},
+            bgcolor="rgba(14,17,23,0.65)",
+            borderpad=2,
+        )
     fig.update_xaxes(title_text="index", row=len(selected), col=1)
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(showgrid=False)
@@ -578,3 +602,5 @@ if df is not None and dataset_id is not None:
 
     with st.expander("Browse the data"):
         st.dataframe(df, width="stretch")
+
+st.caption("© 2026 Ground Truth Data Co — CraneView")

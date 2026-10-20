@@ -70,3 +70,7 @@ Then open the URL Streamlit prints (usually http://localhost:8501).
 It's a standard Streamlit app: push this folder to a GitHub repo and point
 [Streamlit Community Cloud](https://streamlit.io/cloud) (or a Hugging Face
 Space with the Streamlit SDK) at `app.py`.
+
+---
+
+© 2026 Ground Truth Data Co
