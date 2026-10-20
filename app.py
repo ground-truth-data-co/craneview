@@ -184,7 +184,7 @@ def prepare_y(series: pd.Series, kind: str) -> pd.Series:
 
 
 def _axis_ref(axis: str, row: int) -> str:
-    """Subplot axis ids for shapes: x/y for row 1, x2/y2 for row 2, ..."""
+    """Subplot axis ids: x/y for row 1, x2/y2 for row 2, ..."""
     return axis if row == 1 else f"{axis}{row}"
 
 
@@ -203,19 +203,28 @@ def _rgba(color: str, alpha: float) -> str:
 
 
 def add_categorical_panel(
-    fig: go.Figure, row: int, series: pd.Series, x_all: np.ndarray, palette: list[str]
-) -> list[dict]:
-    """Draw a categorical variable as touching rectangles — a train.
+    fig: go.Figure,
+    row: int,
+    series: pd.Series,
+    x_all: np.ndarray,
+    palette: list[str],
+    panel_px: float,
+) -> None:
+    """Draw a categorical variable as touching segments — a train.
 
-    One rectangle per *run* of consecutive rows sharing a category, in
+    One segment per *run* of consecutive rows sharing a category, in
     that category's lane, each car stretched halfway to its neighbours
     so consecutive cars touch with no gap. A long block of one category
     reads as one solid segment; a one-row typo is a single narrow car
-    alone in its lane. Run-length encoding also keeps the shape count
-    tiny compared to one rectangle per row.
+    alone in its lane. Run-length encoding also keeps the segment
+    count tiny compared to one per row.
 
-    Returns the rectangles as plain dicts; build_figure attaches them
-    to the figure in one go (see _attach_shapes for why).
+    The cars are fat line segments on WebGL traces (one trace per
+    lane), NOT layout rectangles: plotly draws layout shapes as
+    individual SVG elements, and thousands of runs made browsers —
+    especially older laptops — crawl. panel_px is the panel's height
+    in pixels, needed because line widths are pixels while the band
+    height is in axis units.
     """
     categories = list(pd.unique(series.dropna()))
     codes = {cat: i for i, cat in enumerate(categories)}
@@ -224,7 +233,6 @@ def add_categorical_panel(
         frame = frame.iloc[:: len(frame) // MAX_PLOT_POINTS + 1]
     xs = frame["x"].to_numpy()
     cats = frame["cat"].to_numpy()
-    xref, yref = _axis_ref("x", row), _axis_ref("y", row)
 
     # Collect the runs first; they are painted lane by lane below.
     runs: list[tuple[int, float, float]] = []  # (lane code, left, right)
@@ -243,29 +251,8 @@ def add_categorical_panel(
         runs.append((codes[cats[run_start]], float(left), float(right)))
         run_start = i
 
-    # Paint order keeps the layering consistent instead of depending
-    # on which run happens to come first in the data. The rectangles
-    # are returned as plain dicts, NOT assigned to the figure here:
-    # plotly validates every shape on assignment (~1 ms each), so
-    # assigning per panel re-validated the growing list every time —
-    # quadratic, minutes on a few thousand runs. build_figure
-    # attaches the full set once, at the end.
-    new_shapes = [
-        {
-            "type": "rect",
-            "x0": left,
-            "x1": right,
-            "y0": code * CAT_PITCH - CAT_HALF_HEIGHT,
-            "y1": code * CAT_PITCH + CAT_HALF_HEIGHT,
-            "fillcolor": _rgba(palette[code % len(palette)], CAT_FILL_ALPHA),
-            "line": {"width": 0},
-            "xref": xref,
-            "yref": yref,
-        }
-        for code, left, right in sorted(runs)
-    ]
-
-    # Shapes can't hover, so invisible points carry the hover text.
+    # Invisible points carry the hover text — one per row, which the
+    # run segments (one per run) can't express.
     fig.add_trace(
         go.Scattergl(
             x=xs,
@@ -320,7 +307,35 @@ def add_categorical_panel(
     )
     # No x-axis line on categorical panels — the bands are the picture.
     fig.update_xaxes(showline=False, zeroline=False, ticks="", row=row, col=1)
-    return new_shapes
+
+    # One fat-line trace per lane, lanes painted in order so higher
+    # lanes lie over lower ones where the bands overlap — the same
+    # layering the rectangles had. The line width converts the band
+    # height from axis units to the panel's pixels.
+    band_px = panel_px * (2 * CAT_HALF_HEIGHT) / (axis_hi - axis_lo)
+    runs_by_lane: dict[int, list[tuple[float, float]]] = {}
+    for code, left, right in runs:
+        runs_by_lane.setdefault(code, []).append((left, right))
+    for code in sorted(runs_by_lane):
+        xs_line: list[float | None] = []
+        ys_line: list[float | None] = []
+        for left, right in runs_by_lane[code]:
+            xs_line += [left, right, None]  # None breaks the line between runs
+            ys_line += [code * CAT_PITCH, code * CAT_PITCH, None]
+        fig.add_trace(
+            go.Scattergl(
+                x=xs_line,
+                y=ys_line,
+                mode="lines",
+                line={
+                    "width": band_px,
+                    "color": _rgba(palette[code % len(palette)], CAT_FILL_ALPHA),
+                },
+                hoverinfo="skip",
+            ),
+            row=row,
+            col=1,
+        )
 
 
 def _has_text_wrapped_numbers(series: pd.Series) -> bool:
@@ -341,15 +356,13 @@ def add_panel(
     series: pd.Series,
     kind: str,
     x_all: np.ndarray,
+    panel_px: float,
     palette: list[str] | None = None,
-) -> list[dict]:
-    """Draw one variable into its subplot panel, styled by kind.
-
-    Returns the panel's band rectangles (categorical panels only;
-    every other kind returns an empty list).
-    """
+) -> None:
+    """Draw one variable into its subplot panel, styled by kind."""
     if kind == "categorical":
-        return add_categorical_panel(fig, row, series, x_all, palette or OKABE_ITO)
+        add_categorical_panel(fig, row, series, x_all, palette or OKABE_ITO, panel_px)
+        return
 
     y = prepare_y(series, kind)
     frame = pd.DataFrame({"x": x_all, "y": y}).dropna()
@@ -386,26 +399,21 @@ def add_panel(
         # axis, so they don't draw — the summary table still counts
         # them (min/mean/median are computed on the raw values).
         fig.update_yaxes(type="log", row=row, col=1)
-    return []
 
 
-def _attach_shapes(fig: go.Figure, shapes: list[dict]) -> None:
-    """Attach every panel's band rectangles to the figure, unchecked.
+def _panel_height_px(n_panels: int) -> float:
+    """Pixel height of one panel, mirroring build_figure's layout math.
 
-    Plotly validates each layout shape as it's assigned (~1 ms per
-    shape), and a chart can hold tens of thousands of run rectangles —
-    that validation is what made big files take minutes to draw. The
-    dicts built by add_categorical_panel are already exactly the JSON
-    plotly.js consumes, so they're stored directly; if a future
-    plotly moves the internals this relies on, fall back to the
-    ordinary (checked, slower) assignment.
+    Categorical band widths are set in pixels (plotly line widths are
+    pixels), so they need the panel's real height: the figure height
+    build_figure uses (PANEL_PX per panel, 280 minimum), minus the
+    top/bottom margins (12 + 40), minus the inter-panel spacing. If
+    those layout numbers change, this must change with them.
     """
-    if not shapes:
-        return
-    try:
-        fig.layout._props["shapes"] = shapes
-    except AttributeError:
-        fig.layout.shapes = tuple(go.layout.Shape(**shape) for shape in shapes)
+    height = max(PANEL_PX * n_panels + 60, 280)
+    plot_height = height - 52
+    spacing = min(0.12 / n_panels, 0.01)
+    return plot_height * (1 - (n_panels - 1) * spacing) / n_panels
 
 
 def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure:
@@ -417,14 +425,14 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         shared_xaxes=True,
         vertical_spacing=min(0.12 / len(selected), 0.01),
     )
+    panel_px = _panel_height_px(len(selected))
     cat_number = 0  # which categorical variable this is (for palettes)
-    all_shapes: list[dict] = []  # every panel's band rectangles
     for i, (name, kind) in enumerate(selected, start=1):
         palette = None
         if kind == "categorical":
             palette = PALETTE_FAMILIES[cat_number % len(PALETTE_FAMILIES)]
             cat_number += 1
-        all_shapes.extend(add_panel(fig, i, df[name], kind, x_all, palette))
+        add_panel(fig, i, df[name], kind, x_all, panel_px, palette)
         # Variable names are horizontal label chips pinned to each
         # panel's top-left corner. (Plotly y-axis titles are always
         # rotated vertical, and at this panel height neighbouring
@@ -490,8 +498,6 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         clickmode="event+select",
         margin={"l": 70, "r": 10, "t": 12, "b": 40},
     )
-    # Last step, so nothing else has to touch the layout afterwards.
-    _attach_shapes(fig, all_shapes)
     return fig
 
 

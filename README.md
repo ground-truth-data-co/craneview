@@ -27,7 +27,7 @@ data-entry errors actually look, and they're what this tool is for.
   over a shared row-index axis (0, 1, 2, 3, …). Numeric and datetime
   panels plot the value against row number, colored by value on the
   viridis scale; categorical panels draw one lane per category filled
-  with touching rectangles — one per run of consecutive rows — in a
+  with touching segments — one per run of consecutive rows — in a
   qualitative palette (a different palette family per variable; a
   typo'd level like `f` vs `F` gets its own lane, color, and visibly
   tiny train car); text panels plot string length, since the text
