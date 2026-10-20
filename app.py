@@ -37,20 +37,12 @@ OKABE_ITO = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "
 # full of categorical panels isn't the same orange/blue/green over and
 # over: variable 1 uses Okabe-Ito, variable 2 Safe, and so on, cycling
 # if there are more categorical variables than families. Within a
-# variable, categories take the family's colors in order. The
-# magenta/pink worked into most families (5th slot) is deliberate —
-# pink-forward was requested; small variables keep their original
-# first colors, and any variable with 5+ categories picks up a pink.
-def _with_pink(family: list[str], pink: str) -> list[str]:
-    """Insert a pink into a palette family at the 5th slot."""
-    return family[:4] + [pink] + family[4:]
-
-
+# variable, categories take the family's colors in order.
 PALETTE_FAMILIES = [
-    _with_pink(OKABE_ITO, "#E7298A"),
-    _with_pink(list(plotly.colors.qualitative.Safe), "#F781BF"),
-    _with_pink(list(plotly.colors.qualitative.Set2), "#E7298A"),
-    _with_pink(list(plotly.colors.qualitative.T10), "#F781BF"),
+    OKABE_ITO,
+    plotly.colors.qualitative.Safe,
+    plotly.colors.qualitative.Set2,
+    plotly.colors.qualitative.T10,
     plotly.colors.qualitative.Bold,
 ]
 
@@ -68,12 +60,17 @@ INITIAL_WINDOW = 500
 # how many lane labels fit in a panel without colliding.
 PANEL_PX = 92
 
-# Categorical bands are 3 lane-heights tall (half-height 1.5 around
-# the lane center): adjacent bands overlap by 2/3 of their height,
-# like tiles offset by a third — if lane A's band spans 0–12 in some
-# unit, B's spans 4–16 and C's 8–20. The fill is translucent so
-# overlapped bands blend instead of the top one hiding the rest.
-CAT_HALF_HEIGHT = 1.5
+# Categorical band geometry. Bands are 1.0 units tall (half-height
+# 0.5 around the lane center) and lanes sit 1/3 of a unit apart, so
+# neighbouring bands overlap by 2/3 of their height - tiles offset
+# by a third, the ratio from the spec example (lane A spans 0-12,
+# B spans 4-16, C spans 8-20, in whatever unit). The fill is
+# translucent so overlapped bands blend instead of hiding each other.
+# The panel's axis range is padded out to the span the earlier
+# 3-tall bands used - otherwise the axis would zoom in to fit the
+# smaller bands and they'd render exactly the same size as before.
+CAT_HALF_HEIGHT = 0.5
+CAT_PITCH = (2 * CAT_HALF_HEIGHT) / 3  # lane spacing = band height / 3
 CAT_FILL_ALPHA = 0.8
 
 SAMPLES = {
@@ -193,8 +190,8 @@ def add_categorical_panel(
             type="rect",
             x0=left,
             x1=right,
-            y0=code - CAT_HALF_HEIGHT,
-            y1=code + CAT_HALF_HEIGHT,
+            y0=code * CAT_PITCH - CAT_HALF_HEIGHT,
+            y1=code * CAT_PITCH + CAT_HALF_HEIGHT,
             fillcolor=_rgba(palette[code % len(palette)], CAT_FILL_ALPHA),
             line_width=0,
             xref=xref,
@@ -208,7 +205,7 @@ def add_categorical_panel(
     fig.add_trace(
         go.Scattergl(
             x=xs,
-            y=[codes[c] for c in cats],
+            y=[codes[c] * CAT_PITCH for c in cats],
             mode="markers",
             marker={"size": 8, "opacity": 0},
             text=[str(c) for c in cats],
@@ -222,14 +219,18 @@ def add_categorical_panel(
     # leave the rest to hover, which always shows the full value.
     label_stride = max(1, math.ceil(len(categories) * 13 / PANEL_PX))
     shown = range(0, len(categories), label_stride)
+    # Pad the axis range out to the span the old 3-tall bands used
+    # ((K-1) + 3.1 for K categories) so the smaller bands render
+    # smaller instead of the axis zooming in — see CAT_HALF_HEIGHT.
+    content_span = (len(categories) - 1) * CAT_PITCH + 2 * CAT_HALF_HEIGHT
+    range_pad = max(0.05, (len(categories) + 2.1 - content_span) / 2)
     fig.update_yaxes(
-        tickvals=[codes[categories[i]] for i in shown],
+        tickvals=[codes[categories[i]] * CAT_PITCH for i in shown],
         # Axis labels are truncated (the full value is on hover): one
         # pasted-paragraph category would otherwise shove the whole
         # plot to the right.
         ticktext=[truncate_label(str(categories[i])) for i in shown],
-        # Pad the range slightly so the first/last bands aren't clipped.
-        range=[-CAT_HALF_HEIGHT - 0.05, len(categories) - 1 + CAT_HALF_HEIGHT + 0.05],
+        range=[-CAT_HALF_HEIGHT - range_pad, (len(categories) - 1) * CAT_PITCH + CAT_HALF_HEIGHT + range_pad],
         # No horizontal line through the first lane (the y=0 zeroline).
         zeroline=False,
         row=row,
@@ -237,6 +238,18 @@ def add_categorical_panel(
     )
     # No x-axis line on categorical panels — the bands are the picture.
     fig.update_xaxes(showline=False, zeroline=False, ticks="", row=row, col=1)
+
+
+def _has_text_wrapped_numbers(series: pd.Series) -> bool:
+    """True if any value only yields a number by stripping text.
+
+    ('PLT-1042' doesn't parse as a number directly but contains one;
+    a column of plain '12.5' strings parses directly and returns
+    False — nothing was wrapped, so hover needs no original text.)
+    """
+    if pd.api.types.is_numeric_dtype(series):
+        return False
+    return bool((pd.to_numeric(series, errors="coerce").isna() & series.notna()).any())
 
 
 def add_panel(
@@ -256,9 +269,14 @@ def add_panel(
     frame = pd.DataFrame({"x": x_all, "y": y}).dropna()
     if kind == "text":
         frame["label"] = series.astype(str).str.slice(0, 80)
+    elif kind in ("numeric", "log numeric") and _has_text_wrapped_numbers(series):
+        # Some values were text with a number inside ('PLT-1042'):
+        # carry the original text so hover can show it next to the
+        # extracted number — the coercion shouldn't hide the source.
+        frame["label"] = series.astype(str).str.slice(0, 80)
     if len(frame) > MAX_PLOT_POINTS:
         frame = frame.iloc[:: len(frame) // MAX_PLOT_POINTS + 1]
-    # Color echoes the value on the plasma scale: continuous variables
+    # Color echoes the value on a viridis scale: continuous variables
     # get a gradient, so a block of wrong-unit rows shows up as a block
     # of wrong color as well as wrong height. Datetimes color by their
     # underlying timestamp number.
@@ -268,10 +286,12 @@ def add_panel(
             x=frame["x"],
             y=frame["y"],
             mode="markers",
-            marker={"size": 6, "opacity": 0.75, "color": color_values, "colorscale": "Plasma"},
-            text=frame["label"] if kind == "text" else None,
+            marker={"size": 6, "opacity": 0.75, "color": color_values, "colorscale": "Viridis"},
+            text=frame["label"] if "label" in frame else None,
             hovertemplate="row %{x}<br>%{text}<extra></extra>"
             if kind == "text"
+            else "row %{x}<br>%{text} → %{y}<extra></extra>"
+            if "label" in frame
             else "row %{x}<br>%{y}<extra></extra>",
         ),
         row=row,
