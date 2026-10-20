@@ -79,7 +79,7 @@ MAX_PLOTTED_VARIABLES = 24
 # smaller bands and they'd render exactly the same size as before.
 CAT_HALF_HEIGHT = 0.5
 CAT_PITCH = (2 * CAT_HALF_HEIGHT) / 3  # lane spacing = band height / 3
-CAT_FILL_ALPHA = 0.8
+CAT_FILL_ALPHA = 1.0
 
 # The Type dropdown shows capitalized labels, but internal kind
 # strings stay lowercase everywhere else — detection, summaries and
