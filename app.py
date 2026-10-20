@@ -58,7 +58,7 @@ INITIAL_WINDOW = 500
 # Pixel height budgeted per panel (the figure is PANEL_PX per variable
 # plus fixed margins). The categorical label stride uses it to decide
 # how many lane labels fit in a panel without colliding.
-PANEL_PX = 92
+PANEL_PX = 78
 
 # Categorical band geometry. Bands are 1.0 units tall (half-height
 # 0.5 around the lane center) and lanes sit 1/3 of a unit apart, so
@@ -214,23 +214,33 @@ def add_categorical_panel(
         row=row,
         col=1,
     )
-    # With many categories the lane labels collide vertically (a panel
-    # fits roughly one label per 13px), so label every Nth lane and
-    # leave the rest to hover, which always shows the full value.
-    label_stride = max(1, math.ceil(len(categories) * 13 / PANEL_PX))
-    shown = range(0, len(categories), label_stride)
     # Pad the axis range out to the span the old 3-tall bands used
     # ((K-1) + 3.1 for K categories) so the smaller bands render
     # smaller instead of the axis zooming in — see CAT_HALF_HEIGHT.
     content_span = (len(categories) - 1) * CAT_PITCH + 2 * CAT_HALF_HEIGHT
     range_pad = max(0.05, (len(categories) + 2.1 - content_span) / 2)
+    axis_lo = -CAT_HALF_HEIGHT - range_pad
+    axis_hi = (len(categories) - 1) * CAT_PITCH + CAT_HALF_HEIGHT + range_pad
+    # Lane labels are spread evenly over the panel's full height
+    # instead of sitting at the (compressed) lane centers, where
+    # they'd print on top of each other; top-to-bottom order still
+    # matches the bands. With many categories, label every Nth one
+    # and leave the rest to hover, which shows the full value.
+    if len(categories) > 1:
+        label_positions = [
+            axis_lo + i * (axis_hi - axis_lo) / (len(categories) - 1) for i in range(len(categories))
+        ]
+    else:
+        label_positions = [(axis_lo + axis_hi) / 2]
+    label_stride = max(1, math.ceil(13 * max(len(categories) - 1, 1) / PANEL_PX))
+    shown = range(0, len(categories), label_stride)
     fig.update_yaxes(
-        tickvals=[codes[categories[i]] * CAT_PITCH for i in shown],
+        tickvals=[label_positions[i] for i in shown],
         # Axis labels are truncated (the full value is on hover): one
         # pasted-paragraph category would otherwise shove the whole
         # plot to the right.
         ticktext=[truncate_label(str(categories[i])) for i in shown],
-        range=[-CAT_HALF_HEIGHT - range_pad, (len(categories) - 1) * CAT_PITCH + CAT_HALF_HEIGHT + range_pad],
+        range=[axis_lo, axis_hi],
         # No horizontal line through the first lane (the y=0 zeroline).
         zeroline=False,
         row=row,
@@ -311,7 +321,7 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         rows=len(selected),
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=min(0.18 / len(selected), 0.022),
+        vertical_spacing=min(0.12 / len(selected), 0.01),
     )
     cat_number = 0  # which categorical variable this is (for palettes)
     for i, (name, kind) in enumerate(selected, start=1):
@@ -359,7 +369,7 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         # Clicking a point selects it (without this, clicks only fire
         # hover events and Streamlit never hears about them).
         clickmode="event+select",
-        margin={"l": 70, "r": 10, "t": 20, "b": 40},
+        margin={"l": 70, "r": 10, "t": 12, "b": 40},
     )
     return fig
 
