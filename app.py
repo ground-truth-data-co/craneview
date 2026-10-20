@@ -15,6 +15,7 @@ Run locally:  streamlit run app.py
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -24,25 +25,32 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from craneview_core import KINDS, analyze, as_datetime, extract_numbers, format_details, truncate_label
+from craneview_core import KINDS, analyze, as_datetime, as_numeric, format_details, truncate_label
 
 # Qualitative palette for categories: Okabe-Ito, designed so that
 # neighboring categories stay distinguishable (and colorblind-safe).
-# Viridis is a sequential palette — right for continuous values, wrong
-# for categories, whose shades blur into each other. Beyond these,
-# append Plotly's Safe qualitative set, then cycle.
+# Sequential palettes (viridis, plasma) are for continuous values —
+# wrong for categories, whose shades blur into each other.
 OKABE_ITO = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"]
 
 # Each categorical *variable* gets its own palette family, so a figure
 # full of categorical panels isn't the same orange/blue/green over and
 # over: variable 1 uses Okabe-Ito, variable 2 Safe, and so on, cycling
 # if there are more categorical variables than families. Within a
-# variable, categories take the family's colors in order.
+# variable, categories take the family's colors in order. The
+# magenta/pink worked into most families (5th slot) is deliberate —
+# pink-forward was requested; small variables keep their original
+# first colors, and any variable with 5+ categories picks up a pink.
+def _with_pink(family: list[str], pink: str) -> list[str]:
+    """Insert a pink into a palette family at the 5th slot."""
+    return family[:4] + [pink] + family[4:]
+
+
 PALETTE_FAMILIES = [
-    OKABE_ITO,
-    plotly.colors.qualitative.Safe,
-    plotly.colors.qualitative.Set2,
-    plotly.colors.qualitative.T10,
+    _with_pink(OKABE_ITO, "#E7298A"),
+    _with_pink(list(plotly.colors.qualitative.Safe), "#F781BF"),
+    _with_pink(list(plotly.colors.qualitative.Set2), "#E7298A"),
+    _with_pink(list(plotly.colors.qualitative.T10), "#F781BF"),
     plotly.colors.qualitative.Bold,
 ]
 
@@ -55,11 +63,17 @@ MAX_PLOT_POINTS = 20_000
 # squeezed into one screen width is not QA, it's wallpaper.
 INITIAL_WINDOW = 500
 
-# Categorical bands are 1.1 lane-heights tall (half-height 0.55 around
-# the lane center): just a sliver of overlap where neighbouring bands
-# meet. The fill is translucent so overlapped bands blend instead of
-# the top one hiding the ones beneath.
-CAT_HALF_HEIGHT = 0.55
+# Pixel height budgeted per panel (the figure is PANEL_PX per variable
+# plus fixed margins). The categorical label stride uses it to decide
+# how many lane labels fit in a panel without colliding.
+PANEL_PX = 92
+
+# Categorical bands are 3 lane-heights tall (half-height 1.5 around
+# the lane center): adjacent bands overlap by 2/3 of their height,
+# like tiles offset by a third — if lane A's band spans 0–12 in some
+# unit, B's spans 4–16 and C's 8–20. The fill is translucent so
+# overlapped bands blend instead of the top one hiding the rest.
+CAT_HALF_HEIGHT = 1.5
 CAT_FILL_ALPHA = 0.8
 
 SAMPLES = {
@@ -103,9 +117,7 @@ def prepare_y(series: pd.Series, kind: str) -> pd.Series:
     their row position is itself visible in the plot.
     """
     if kind in ("numeric", "log numeric"):
-        return pd.to_numeric(series, errors="coerce")
-    if kind == "stripped numeric":
-        return extract_numbers(series)
+        return as_numeric(series)
     if kind == "datetime":
         return as_datetime(series)
     if kind == "text":
@@ -194,7 +206,7 @@ def add_categorical_panel(
 
     # Shapes can't hover, so invisible points carry the hover text.
     fig.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=xs,
             y=[codes[c] for c in cats],
             mode="markers",
@@ -205,12 +217,17 @@ def add_categorical_panel(
         row=row,
         col=1,
     )
+    # With many categories the lane labels collide vertically (a panel
+    # fits roughly one label per 13px), so label every Nth lane and
+    # leave the rest to hover, which always shows the full value.
+    label_stride = max(1, math.ceil(len(categories) * 13 / PANEL_PX))
+    shown = range(0, len(categories), label_stride)
     fig.update_yaxes(
-        tickvals=list(codes.values()),
+        tickvals=[codes[categories[i]] for i in shown],
         # Axis labels are truncated (the full value is on hover): one
         # pasted-paragraph category would otherwise shove the whole
         # plot to the right.
-        ticktext=[truncate_label(str(c)) for c in categories],
+        ticktext=[truncate_label(str(categories[i])) for i in shown],
         # Pad the range slightly so the first/last bands aren't clipped.
         range=[-CAT_HALF_HEIGHT - 0.05, len(categories) - 1 + CAT_HALF_HEIGHT + 0.05],
         # No horizontal line through the first lane (the y=0 zeroline).
@@ -241,17 +258,17 @@ def add_panel(
         frame["label"] = series.astype(str).str.slice(0, 80)
     if len(frame) > MAX_PLOT_POINTS:
         frame = frame.iloc[:: len(frame) // MAX_PLOT_POINTS + 1]
-    # Color echoes the value on a viridis scale: continuous variables
+    # Color echoes the value on the plasma scale: continuous variables
     # get a gradient, so a block of wrong-unit rows shows up as a block
     # of wrong color as well as wrong height. Datetimes color by their
     # underlying timestamp number.
     color_values = frame["y"].astype("int64") if kind == "datetime" else frame["y"]
     fig.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=frame["x"],
             y=frame["y"],
             mode="markers",
-            marker={"size": 6, "opacity": 0.75, "color": color_values, "colorscale": "Viridis"},
+            marker={"size": 6, "opacity": 0.75, "color": color_values, "colorscale": "Plasma"},
             text=frame["label"] if kind == "text" else None,
             hovertemplate="row %{x}<br>%{text}<extra></extra>"
             if kind == "text"
@@ -296,9 +313,27 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         # the rest. The axes are shared, so every panel moves together.
         for i in range(1, len(selected) + 1):
             fig.update_xaxes(range=[-0.5, INITIAL_WINDOW - 0.5], row=i, col=1)
-        fig.update_xaxes(rangeslider_visible=True, row=len(selected), col=1)
+        fig.update_xaxes(
+            rangeslider={
+                "visible": True,
+                # Slim and bright — the default slider is tall and
+                # murky against the dark theme — and its travel is
+                # clamped to the data, so the window can't be dragged
+                # into negative index numbers.
+                "thickness": 0.07,
+                "bgcolor": "rgba(148,163,184,0.30)",
+                "bordercolor": "rgba(226,232,240,0.9)",
+                "borderwidth": 1,
+                "range": [0, len(df) - 1],
+            },
+            # Index numbers for reference, just above the slider.
+            showticklabels=True,
+            tickfont={"size": 13},
+            row=len(selected),
+            col=1,
+        )
     fig.update_layout(
-        height=max(92 * len(selected) + 60, 280),
+        height=max(PANEL_PX * len(selected) + 60, 280),
         showlegend=False,
         dragmode="pan",
         margin={"l": 70, "r": 10, "t": 20, "b": 40},
@@ -317,6 +352,12 @@ if df is not None and dataset_id is not None:
 
     kinds: dict[str, str] = st.session_state["kinds"]
     checks: dict[str, bool] = st.session_state["checks"]
+    # A saved kind can outlive the app version that offered it (types
+    # get merged/renamed between releases); anything no longer on the
+    # menu falls back to the detected kind instead of breaking the
+    # editor's dropdown.
+    detected_kinds = {s.name: s.kind for s in analyze(df)}
+    kinds = {name: (k if k in KINDS else detected_kinds[name]) for name, k in kinds.items()}
 
     st.caption(f"{len(df):,} rows × {len(df.columns)} columns")
     summary_rows = [

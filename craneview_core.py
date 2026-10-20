@@ -97,7 +97,7 @@ def as_datetime(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce", format="mixed")
 
 
-KINDS = ("numeric", "log numeric", "stripped numeric", "categorical", "datetime", "text")
+KINDS = ("numeric", "log numeric", "categorical", "datetime", "text")
 
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
@@ -122,12 +122,27 @@ def _first_number(value: object) -> float:
 def extract_numbers(series: pd.Series) -> pd.Series:
     """Pull the first number out of each value of a text column.
 
-    Backs the 'stripped numeric' type: a column like 'PLT-1042',
-    '12.5 kg', 'P07' becomes the numbers inside it. Values with no
-    number become NaN — they don't plot, and the gap is visible, the
-    same contract as the other coercions.
+    Values with no number in them become NaN.
     """
     return series.map(_first_number)
+
+
+def as_numeric(series: pd.Series) -> pd.Series:
+    """Coerce a column to numbers, seeing through text wrappers.
+
+    This is what the 'numeric' type means: values that already parse
+    as numbers pass through ('12.5', '1042'); values that merely
+    *contain* a number get it extracted ('PLT-1042' -> 1042,
+    '12.5 kg' -> 12.5); values with no number in them at all are
+    rejected to NaN, where they show up as gaps in the plot and are
+    counted in the summary's missing tally via the coercion.
+    """
+    direct = pd.to_numeric(series, errors="coerce")
+    leftover = direct.isna() & series.notna()
+    if leftover.any():
+        direct = direct.copy()
+        direct[leftover] = extract_numbers(series[leftover])
+    return direct
 
 
 def summarize(series: pd.Series, kind: str | None = None) -> ColumnSummary:
@@ -153,13 +168,8 @@ def summarize(series: pd.Series, kind: str | None = None) -> ColumnSummary:
     )
 
     non_null = series.dropna()
-    if kind in ("numeric", "log numeric", "stripped numeric"):
-        raw = (
-            extract_numbers(non_null)
-            if kind == "stripped numeric"
-            else pd.to_numeric(non_null, errors="coerce")
-        )
-        values = raw.dropna()
+    if kind in ("numeric", "log numeric"):
+        values = as_numeric(non_null).dropna()
         summary.details = {
             "min": _clean_number(values.min()),
             "max": _clean_number(values.max()),
@@ -210,7 +220,7 @@ def format_details(summary: ColumnSummary) -> str:
     datetime, a length range for text.
     """
     d = summary.details
-    if summary.kind in ("numeric", "log numeric", "stripped numeric"):
+    if summary.kind in ("numeric", "log numeric"):
         return " · ".join(
             f"{label} {_format_number(d.get(key))}"
             for label, key in (("min", "min"), ("max", "max"), ("mean", "mean"), ("median", "median"))
