@@ -336,9 +336,42 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         height=max(PANEL_PX * len(selected) + 60, 280),
         showlegend=False,
         dragmode="pan",
+        # Clicking a point selects it (without this, clicks only fire
+        # hover events and Streamlit never hears about them).
+        clickmode="event+select",
         margin={"l": 70, "r": 10, "t": 20, "b": 40},
     )
     return fig
+
+
+def _row_from_point(fig: go.Figure, point: dict) -> int | None:
+    """Row index for a clicked chart point.
+
+    Every trace's x is the row index, so the point's own x is the
+    answer; if a payload ever lacks x, look the point up in the trace
+    it came from instead.
+    """
+    x = point.get("x")
+    if x is not None:
+        return int(x)
+    curve = point.get("curve_number", point.get("curveNumber"))
+    index = point.get("point_index", point.get("pointIndex"))
+    if curve is not None and index is not None and curve < len(fig.data):
+        xs = fig.data[curve].x
+        if xs is not None and index < len(xs):
+            return int(xs[index])
+    return None
+
+
+def _step_focus(delta: int, n_rows: int) -> None:
+    """Move the focused row by delta, clamped to the data."""
+    current = st.session_state.get("focus_row")
+    if current is not None:
+        st.session_state["focus_row"] = min(max(current + delta, 0), n_rows - 1)
+
+
+def _clear_focus() -> None:
+    st.session_state["focus_row"] = None
 
 
 if df is not None and dataset_id is not None:
@@ -349,6 +382,8 @@ if df is not None and dataset_id is not None:
         st.session_state["kinds"] = {s.name: s.kind for s in analyze(df)}
         st.session_state["checks"] = {str(col): True for col in df.columns}
         st.session_state["editor_rev"] = 0
+        st.session_state["focus_row"] = None
+        st.session_state["chart_signature"] = None
 
     kinds: dict[str, str] = st.session_state["kinds"]
     checks: dict[str, bool] = st.session_state["checks"]
@@ -409,12 +444,57 @@ if df is not None and dataset_id is not None:
 
     selected = [(name, new_kinds[name]) for name in (str(c) for c in df.columns) if new_checks.get(name)]
     if selected:
-        st.plotly_chart(
-            build_figure(df, selected),
+        fig = build_figure(df, selected)
+        event = st.plotly_chart(
+            fig,
+            key="craneview_plot",
+            on_select="rerun",
+            selection_mode="points",
             config={"displaylogo": False, "responsive": True, "scrollZoom": True},
         )
+        points = event.selection.points if event is not None and event.selection else []
+        if points:
+            # Only a *changed* selection moves the focus — otherwise
+            # the still-reported last click would keep snapping the
+            # focus back after the user steps to a neighbouring row.
+            signature = tuple(
+                (
+                    p.get("curve_number", p.get("curveNumber")),
+                    p.get("point_index", p.get("pointIndex")),
+                    p.get("x"),
+                )
+                for p in points
+            )
+            if signature != st.session_state.get("chart_signature"):
+                st.session_state["chart_signature"] = signature
+                row = _row_from_point(fig, points[0])
+                if row is not None:
+                    st.session_state["focus_row"] = row
     else:
         st.caption("No variables selected.")
+
+    # The focused row: the full record behind a clicked point. (The
+    # data table itself can't be scrolled to a row — Streamlit offers
+    # no API for that — so the record comes to a strip of its own,
+    # with stepping to walk the neighbourhood of a suspicious point.)
+    focus = st.session_state.get("focus_row")
+    if focus is None or not 0 <= focus < len(df):
+        st.caption("Click any point in the plot to inspect its full row here.")
+    else:
+        nav = st.columns([1, 4, 1, 1])
+        nav[0].button(
+            "← Prev", key="prev_row", disabled=focus == 0,
+            on_click=_step_focus, args=(-1, len(df)),
+        )
+        nav[1].markdown(f"**Row {focus}** — full record ({len(df):,} rows total)")
+        nav[2].button(
+            "Next →", key="next_row", disabled=focus == len(df) - 1,
+            on_click=_step_focus, args=(1, len(df)),
+        )
+        nav[3].button("Clear", key="clear_row", on_click=_clear_focus)
+        record = df.iloc[focus].rename("Value")
+        record.index.name = "Variable"
+        st.dataframe(record.to_frame(), width="stretch", height=min(38 + 35 * len(record), 420))
 
     with st.expander("Browse the data"):
         st.dataframe(df, width="stretch")

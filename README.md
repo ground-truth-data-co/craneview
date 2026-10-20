@@ -32,6 +32,9 @@ data-entry errors actually look, and they're what this tool is for.
   typo'd level like `f` vs `F` gets its own lane, color, and visibly
   tiny train car); text panels plot string length, since the text
   itself can't be a y-axis.
+- **Click a point, see its row**: clicking any point in the plot shows
+  that row's full record below the chart, with Prev/Next buttons to
+  walk the rows around a suspicious value.
 - **Bundled samples** if you have no file handy: a 100-row plant dataset
   with planted entry errors, iris, the classic mpg cars data, and a
   2,000-row field trial.
