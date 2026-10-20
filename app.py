@@ -25,7 +25,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from craneview_core import KINDS, analyze, as_datetime, as_numeric, format_details, truncate_label
+from craneview_core import KINDS, analyze, as_datetime, as_numeric, format_details, tidy_findings, truncate_label
 
 # Qualitative palette for categories: Okabe-Ito, designed so that
 # neighboring categories stay distinguishable (and colorblind-safe).
@@ -60,6 +60,14 @@ INITIAL_WINDOW = 500
 # how many lane labels fit in a panel without colliding.
 PANEL_PX = 78
 
+# At most this many variables are plotted at once. Twenty-four panels
+# is already a long scroll, and past it the figure gets enormous and
+# the browser bogs down — a 1,024-column file would otherwise try to
+# build a 1,024-panel figure. Wide files are also usually untidy
+# (see tidy_findings), so most of their columns aren't variables
+# worth a panel until the file has been melted anyway.
+MAX_PLOTTED_VARIABLES = 24
+
 # Categorical band geometry. Bands are 1.0 units tall (half-height
 # 0.5 around the lane center) and lanes sit 1/3 of a unit apart, so
 # neighbouring bands overlap by 2/3 of their height - tiles offset
@@ -80,9 +88,35 @@ SAMPLES = {
     "Field trial (2,000 rows)": "field_trial_2000.csv",
 }
 SAMPLES_DIR = Path(__file__).parent / "samples"
+LOGO_PATH = Path(__file__).parent / "assets" / "crane.png"
 
-st.set_page_config(page_title="CraneView", page_icon="🪶", layout="wide")
-st.title("CraneView")
+st.set_page_config(
+    page_title="CraneView",
+    page_icon=str(LOGO_PATH) if LOGO_PATH.exists() else "🪶",
+    layout="wide",
+)
+if LOGO_PATH.exists():
+    _logo_col, _title_col = st.columns([1, 13])
+    _logo_col.image(str(LOGO_PATH), width=84)
+    _title_col.title("CraneView")
+else:
+    st.title("CraneView")
+
+TIDY_EXPLAINER = """\
+Tidy data (Hadley Wickham) follows three rules:
+
+1. **Every column is one variable.** If your column headers are years, dates,
+   or subject names, those are *values* of a variable, not variables themselves.
+2. **Every row is one observation** — one row per thing measured per occasion,
+   not one row per subject with a separate column per time point.
+3. **Every cell is a single value** — no combined entries like "M / age 34".
+
+CraneView plots one panel per column against row number, so it assumes this
+shape. The usual fix for a wide file is to **melt** it: stack the value-named
+columns into two new columns — one holding the old column names, one holding
+the values. In pandas that's `df.melt(id_vars=[...])`; in R/tidyr it's
+`pivot_longer()`. Melt first, then bring the result here.
+"""
 
 
 def read_csv(file) -> pd.DataFrame:
@@ -410,7 +444,9 @@ if df is not None and dataset_id is not None:
     if st.session_state.get("dataset_id") != dataset_id:
         st.session_state["dataset_id"] = dataset_id
         st.session_state["kinds"] = {s.name: s.kind for s in analyze(df)}
-        st.session_state["checks"] = {str(col): True for col in df.columns}
+        st.session_state["checks"] = {
+            str(col): i < MAX_PLOTTED_VARIABLES for i, col in enumerate(df.columns)
+        }
         st.session_state["editor_rev"] = 0
         st.session_state["focus_row"] = None
         st.session_state["chart_signature"] = None
@@ -425,6 +461,14 @@ if df is not None and dataset_id is not None:
     kinds = {name: (k if k in KINDS else detected_kinds[name]) for name, k in kinds.items()}
 
     st.caption(f"{len(df):,} rows × {len(df.columns)} columns")
+    findings = tidy_findings(df)
+    if findings:
+        st.warning(
+            "**Hey — this data doesn't look tidy.** CraneView will still plot it, "
+            "but read these first:\n\n" + "\n\n".join(f"- {f}" for f in findings)
+        )
+        with st.expander("What is tidy data?"):
+            st.markdown(TIDY_EXPLAINER)
     summary_rows = [
         {
             "Visualize": checks.get(s.name, True),
@@ -472,7 +516,14 @@ if df is not None and dataset_id is not None:
         st.session_state["editor_rev"] += 1
         st.rerun()
 
-    selected = [(name, new_kinds[name]) for name in (str(c) for c in df.columns) if new_checks.get(name)]
+    selected_all = [(name, new_kinds[name]) for name in (str(c) for c in df.columns) if new_checks.get(name)]
+    selected = selected_all[:MAX_PLOTTED_VARIABLES]
+    if len(selected_all) > MAX_PLOTTED_VARIABLES:
+        st.warning(
+            f"{len(selected_all)} variables are checked, but at most "
+            f"{MAX_PLOTTED_VARIABLES} are plotted at once — showing the first "
+            f"{MAX_PLOTTED_VARIABLES} in file order. Uncheck some to swap others in."
+        )
     if selected:
         fig = build_figure(df, selected)
         event = st.plotly_chart(
