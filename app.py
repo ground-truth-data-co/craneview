@@ -32,7 +32,19 @@ from craneview_core import KINDS, analyze, as_datetime, format_details, truncate
 # for categories, whose shades blur into each other. Beyond these,
 # append Plotly's Safe qualitative set, then cycle.
 OKABE_ITO = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"]
-CATEGORY_COLORS = OKABE_ITO + [c for c in plotly.colors.qualitative.Safe if c not in OKABE_ITO]
+
+# Each categorical *variable* gets its own palette family, so a figure
+# full of categorical panels isn't the same orange/blue/green over and
+# over: variable 1 uses Okabe-Ito, variable 2 Safe, and so on, cycling
+# if there are more categorical variables than families. Within a
+# variable, categories take the family's colors in order.
+PALETTE_FAMILIES = [
+    OKABE_ITO,
+    plotly.colors.qualitative.Safe,
+    plotly.colors.qualitative.Set2,
+    plotly.colors.qualitative.T10,
+    plotly.colors.qualitative.Bold,
+]
 
 # Above this many rows, plots draw a stride sample so the browser stays
 # responsive. Summaries always use the full data; only the dots thin out.
@@ -43,11 +55,13 @@ MAX_PLOT_POINTS = 20_000
 # squeezed into one screen width is not QA, it's wallpaper.
 INITIAL_WINDOW = 500
 
-# Categorical bands are 3 lane-heights tall (half-height 1.5 around the
-# lane center), so each band overlaps its neighbours by 2/3 of its
-# height. The fill is translucent so overlapped bands blend instead of
-# the top one hiding the ones beneath.
-CAT_HALF_HEIGHT = 1.5
+# Categorical bands are 1.5 lane-heights tall (half-height 0.75 around
+# the lane center), so each band overlaps its neighbours by 1/3 of its
+# height — enough to read as a woven strip, not so much that the
+# middle lanes' solid cores shrink to slivers next to the end lanes'.
+# The fill is translucent so overlapped bands blend instead of the
+# top one hiding the ones beneath.
+CAT_HALF_HEIGHT = 0.75
 CAT_FILL_ALPHA = 0.8
 
 SAMPLES = {
@@ -117,7 +131,9 @@ def _rgba(color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def add_categorical_panel(fig: go.Figure, row: int, series: pd.Series, x_all: np.ndarray) -> None:
+def add_categorical_panel(
+    fig: go.Figure, row: int, series: pd.Series, x_all: np.ndarray, palette: list[str]
+) -> None:
     """Draw a categorical variable as touching rectangles — a train.
 
     One rectangle per *run* of consecutive rows sharing a category, in
@@ -166,7 +182,7 @@ def add_categorical_panel(fig: go.Figure, row: int, series: pd.Series, x_all: np
             x1=right,
             y0=code - CAT_HALF_HEIGHT,
             y1=code + CAT_HALF_HEIGHT,
-            fillcolor=_rgba(CATEGORY_COLORS[code % len(CATEGORY_COLORS)], CAT_FILL_ALPHA),
+            fillcolor=_rgba(palette[code % len(palette)], CAT_FILL_ALPHA),
             line_width=0,
             xref=xref,
             yref=yref,
@@ -194,19 +210,28 @@ def add_categorical_panel(fig: go.Figure, row: int, series: pd.Series, x_all: np
         # pasted-paragraph category would otherwise shove the whole
         # plot to the right.
         ticktext=[truncate_label(str(c)) for c in categories],
-        # Pad the range so the tall first/last bands aren't clipped.
-        range=[-CAT_HALF_HEIGHT - 0.2, len(categories) - 1 + CAT_HALF_HEIGHT + 0.2],
+        # Pad the range so the first/last bands aren't clipped.
+        range=[-CAT_HALF_HEIGHT - 0.15, len(categories) - 1 + CAT_HALF_HEIGHT + 0.15],
+        # No horizontal line through the first lane (the y=0 zeroline).
+        zeroline=False,
         row=row,
         col=1,
     )
     # No x-axis line on categorical panels — the bands are the picture.
-    fig.update_xaxes(showline=False, zeroline=False, row=row, col=1)
+    fig.update_xaxes(showline=False, zeroline=False, ticks="", row=row, col=1)
 
 
-def add_panel(fig: go.Figure, row: int, series: pd.Series, kind: str, x_all: np.ndarray) -> None:
+def add_panel(
+    fig: go.Figure,
+    row: int,
+    series: pd.Series,
+    kind: str,
+    x_all: np.ndarray,
+    palette: list[str] | None = None,
+) -> None:
     """Draw one variable into its subplot panel, styled by kind."""
     if kind == "categorical":
-        add_categorical_panel(fig, row, series, x_all)
+        add_categorical_panel(fig, row, series, x_all, palette or OKABE_ITO)
         return
 
     y = prepare_y(series, kind)
@@ -243,10 +268,15 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         rows=len(selected),
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=min(0.35 / len(selected), 0.08),
+        vertical_spacing=min(0.3 / len(selected), 0.04),
     )
+    cat_number = 0  # which categorical variable this is (for palettes)
     for i, (name, kind) in enumerate(selected, start=1):
-        add_panel(fig, i, df[name], kind, x_all)
+        palette = None
+        if kind == "categorical":
+            palette = PALETTE_FAMILIES[cat_number % len(PALETTE_FAMILIES)]
+            cat_number += 1
+        add_panel(fig, i, df[name], kind, x_all, palette)
         # Variable names label the left side (the y-axis title), not the
         # top of each panel. Text plots get a hint that y is length.
         label = f"{name} (length)" if kind == "text" else name
@@ -262,7 +292,7 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
             fig.update_xaxes(range=[-0.5, INITIAL_WINDOW - 0.5], row=i, col=1)
         fig.update_xaxes(rangeslider_visible=True, row=len(selected), col=1)
     fig.update_layout(
-        height=max(180 * len(selected) + 80, 320),
+        height=max(105 * len(selected) + 60, 280),
         showlegend=False,
         dragmode="pan",
         margin={"l": 70, "r": 10, "t": 20, "b": 40},
