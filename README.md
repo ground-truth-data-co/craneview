@@ -73,4 +73,4 @@ Space with the Streamlit SDK) at `app.py`.
 
 ---
 
-© 2026 Ground Truth Data Co
+© 2026 GroundTruth Data Co

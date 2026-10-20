@@ -603,4 +603,4 @@ if df is not None and dataset_id is not None:
     with st.expander("Browse the data"):
         st.dataframe(df, width="stretch")
 
-st.caption("© 2026 Ground Truth Data Co — CraneView")
+st.caption("© 2026 GroundTruth Data Co — CraneView")
