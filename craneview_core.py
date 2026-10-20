@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+import numpy as np
 import pandas as pd
 
 # A numeric column with at most this many distinct values is almost
@@ -249,98 +250,83 @@ def truncate_label(text: str, limit: int = 28) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-# --- Tidy-data check -------------------------------------------------
+# --- Structure check -------------------------------------------------
 #
-# CraneView assumes tidy data (Hadley Wickham's rules): every column
-# is one variable, every row is one observation, every cell is one
-# value. Real exports often aren't — the classic failure is a "wide"
-# file where values of one variable (years, dates, subjects) have
-# been spread across the column headers. tidy_findings() runs the
-# detectable checks and returns plain-language findings for the UI;
-# it never blocks plotting, it just says what looks off and why.
+# CraneView plots one table: one header row, then data rows, one
+# panel per column. Almost any *single* table works, however dumb
+# its headers are (or even headerless integer column names). What
+# cannot be visualized is more than one table in a file: a second
+# table stacked under the first (usually with its header row
+# repeated mid-data, or blank separator rows), a side table parked
+# in mostly-empty columns, or a totals row from a summary block.
+# structure_findings() detects those shapes and returns
+# plain-language findings for the UI. Deliberately generous: if a
+# structure can be paneled at all, this stays silent.
 
-_MONTH_NAMES = {
-    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-    "january", "february", "march", "april", "june", "july", "august",
-    "september", "october", "november", "december",
-}
-_YEAR_NAME_RE = re.compile(r"^(19|20)\d{2}$")
-_DATE_NAME_RE = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}$|^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$")
-_DUP_SUFFIX_RE = re.compile(r"^(.*)\.(\d+)$")
-_MEASURE_SUFFIX_RE = re.compile(r"^(.*?)[_\-. ]?\d+$")
+_TOTAL_WORDS = {"total", "totals", "sum", "average", "avg", "mean", "grand total"}
 
 
-def _value_like_name(name: str) -> bool:
-    """True if a column *name* looks like a value (a year, date, month, number)."""
-    low = name.strip().lower()
-    if low in _MONTH_NAMES or _YEAR_NAME_RE.match(low) or _DATE_NAME_RE.match(low):
-        return True
-    try:
-        float(low)
-        return True
-    except ValueError:
-        return False
+def structure_findings(df: pd.DataFrame) -> list[str]:
+    """Plain-language findings if the file holds more than one table.
 
-
-def tidy_findings(df: pd.DataFrame) -> list[str]:
-    """Plain-language findings if the frame doesn't look tidy.
-
-    An empty list means no structural issue was spotted (not a proof
-    of tidiness — these are heuristics for the common failure modes).
+    An empty list means the file is one table CraneView can panel —
+    not a judgment on its headers or tidiness in the abstract.
     """
     findings: list[str] = []
     cols = [str(c) for c in df.columns]
 
-    unnamed = [c for c in cols if c.lower().startswith("unnamed")]
-    if unnamed:
+    # A row that repeats the header names is a second table's header:
+    # two tables stacked in one file. Compare in plain object arrays —
+    # with Arrow-backed string columns, DataFrame == Series dispatches
+    # into per-column Arrow comparisons and blows up on 2-D input.
+    if len(df):
+        values = df.astype(str).to_numpy(dtype=object)
+        header_row = np.array(cols, dtype=object)
+        row_match = (values == header_row).mean(axis=1)
+        stacked = int((row_match >= 0.5).sum())
+        if stacked:
+            findings.append(
+                f"{stacked} row(s) in the data repeat the column headers — that "
+                "usually means a second table is stacked underneath the first, "
+                "with its own header row in the middle of the file. Split the "
+                "tables into separate CSVs."
+            )
+
+    # Fully blank rows are separators between stacked tables.
+    blank_rows = int(df.isna().all(axis=1).sum())
+    if blank_rows:
         findings.append(
-            f"{len(unnamed)} column(s) have no header (shown as {unnamed[0]!r}). "
-            "The file may have an extra header row, or a leading column — often a "
-            "saved row index — with no name."
+            f"{blank_rows} row(s) are completely blank. In a single table that "
+            "is just a gap, but blank rows often separate two tables stacked in "
+            "one file — worth checking nothing below the gap is a different table."
         )
 
-    dup_bases = sorted(
-        {
-            m.group(1)
-            for c in cols
-            if (m := _DUP_SUFFIX_RE.match(c)) and m.group(1) in cols
-        }
-    )
-    if dup_bases:
-        findings.append(
-            f"Some column names repeat in the file ({', '.join(dup_bases[:3])} appears "
-            "more than once; repeats are shown here with .1, .2 suffixes). Tidy data "
-            "needs one uniquely-named column per variable."
-        )
+    # Columns empty for (nearly) every row are usually the residue of
+    # a table that sat beside the main one, or spacer columns.
+    if len(df):
+        mostly_empty = [
+            cols[i]
+            for i in range(len(cols))
+            if df.iloc[:, i].isna().mean() >= 0.99
+        ]
+        if mostly_empty:
+            findings.append(
+                f"{len(mostly_empty)} column(s) are empty for nearly every row "
+                f"({', '.join(mostly_empty[:3])}, …). That often means a second "
+                "table sat beside the main one, sharing the file but not the rows."
+            )
 
-    value_like = [c for c in cols if _value_like_name(c)]
-    if len(value_like) >= 5 and len(value_like) >= 0.3 * len(cols):
-        findings.append(
-            f"{len(value_like)} of {len(cols)} columns are named like values "
-            f"({', '.join(value_like[:4])}, …). Those names are probably values of a "
-            "single variable spread across the header row — the classic wide, untidy "
-            "shape. In tidy data they'd be one column of names plus one column of values."
-        )
-
-    measure_groups: dict[str, list[str]] = {}
-    for c in cols:
-        m = _MEASURE_SUFFIX_RE.match(c)
-        if m and m.group(1):
-            measure_groups.setdefault(m.group(1), []).append(c)
-    big_groups = {b: v for b, v in measure_groups.items() if len(v) >= 3}
-    if big_groups:
-        base, members = next(iter(big_groups.items()))
-        findings.append(
-            f"Some columns look like repeated measures of one variable "
-            f"({', '.join(members[:4])}, …). In tidy data, repeated measures become "
-            "rows: one column holds the values, another says which measure each row is."
-        )
-
-    if len(cols) > 100:
-        findings.append(
-            f"This file is very wide: {len(cols):,} columns × {len(df):,} rows. Files "
-            "this wide are usually exports of something else (a survey platform, a "
-            "spreadsheet with one column per subject or time point) and rarely arrive tidy."
-        )
+    # A totals row is a summary table's output mixed into data rows;
+    # it also dwarfs every real value on a numeric panel's scale.
+    if len(df):
+        first_col = df.iloc[:, 0].astype(str).str.strip().str.lower()
+        total_rows = int(first_col.isin(_TOTAL_WORDS).sum())
+        if total_rows:
+            findings.append(
+                f"{total_rows} row(s) look like totals/summary rows (first cell "
+                "'Total', 'Sum', …). Totals belong to a summary table, not the "
+                "data — and one totals row will squash every real value on its "
+                "panels to the floor."
+            )
 
     return findings

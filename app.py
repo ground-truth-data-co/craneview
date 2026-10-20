@@ -25,7 +25,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from craneview_core import KINDS, analyze, as_datetime, as_numeric, format_details, tidy_findings, truncate_label
+from craneview_core import KINDS, analyze, as_datetime, as_numeric, format_details, structure_findings, truncate_label
 
 # Qualitative palette for categories: Okabe-Ito, designed so that
 # neighboring categories stay distinguishable (and colorblind-safe).
@@ -63,9 +63,7 @@ PANEL_PX = 78
 # At most this many variables are plotted at once. Twenty-four panels
 # is already a long scroll, and past it the figure gets enormous and
 # the browser bogs down — a 1,024-column file would otherwise try to
-# build a 1,024-panel figure. Wide files are also usually untidy
-# (see tidy_findings), so most of their columns aren't variables
-# worth a panel until the file has been melted anyway.
+# build a 1,024-panel figure.
 MAX_PLOTTED_VARIABLES = 24
 
 # Categorical band geometry. Bands are 1.0 units tall (half-height
@@ -102,20 +100,21 @@ if LOGO_PATH.exists():
 else:
     st.title("CraneView")
 
-TIDY_EXPLAINER = """\
-Tidy data (Hadley Wickham) follows three rules:
+STRUCTURE_EXPLAINER = """\
+CraneView needs **one table per file**:
 
-1. **Every column is one variable.** If your column headers are years, dates,
-   or subject names, those are *values* of a variable, not variables themselves.
-2. **Every row is one observation** — one row per thing measured per occasion,
-   not one row per subject with a separate column per time point.
-3. **Every cell is a single value** — no combined entries like "M / age 34".
+- **One header row** at the top (or none - numbered columns are fine),
+  then data rows underneath. Headers can be anything; they just label
+  the panels.
+- **Every row a data row.** A second table stacked below the first -
+  with its own header row in the middle - can't be paneled as one
+  dataset.
+- **No side tables.** A second table parked in its own columns beside
+  the main one shares the file but not the rows; split it into its
+  own CSV.
 
-CraneView plots one panel per column against row number, so it assumes this
-shape. The usual fix for a wide file is to **melt** it: stack the value-named
-columns into two new columns — one holding the old column names, one holding
-the values. In pandas that's `df.melt(id_vars=[...])`; in R/tidyr it's
-`pivot_longer()`. Melt first, then bring the result here.
+Within one table, almost anything goes: wide or narrow, tidy or messy
+headers, mixed types. That's the data this tool is for.
 """
 
 
@@ -315,8 +314,8 @@ def add_panel(
         frame["label"] = series.astype(str).str.slice(0, 80)
     elif kind in ("numeric", "log numeric") and _has_text_wrapped_numbers(series):
         # Some values were text with a number inside ('PLT-1042'):
-        # carry the original text so hover can show it next to the
-        # extracted number — the coercion shouldn't hide the source.
+        # carry the original text so hover shows the value as it
+        # actually appears in the file, not just the extracted number.
         frame["label"] = series.astype(str).str.slice(0, 80)
     if len(frame) > MAX_PLOT_POINTS:
         frame = frame.iloc[:: len(frame) // MAX_PLOT_POINTS + 1]
@@ -333,8 +332,6 @@ def add_panel(
             marker={"size": 6, "opacity": 0.75, "color": color_values, "colorscale": "Viridis"},
             text=frame["label"] if "label" in frame else None,
             hovertemplate="row %{x}<br>%{text}<extra></extra>"
-            if kind == "text"
-            else "row %{x}<br>%{text} → %{y}<extra></extra>"
             if "label" in frame
             else "row %{x}<br>%{y}<extra></extra>",
         ),
@@ -461,14 +458,16 @@ if df is not None and dataset_id is not None:
     kinds = {name: (k if k in KINDS else detected_kinds[name]) for name, k in kinds.items()}
 
     st.caption(f"{len(df):,} rows × {len(df.columns)} columns")
-    findings = tidy_findings(df)
+    findings = structure_findings(df)
     if findings:
         st.warning(
-            "**Hey — this data doesn't look tidy.** CraneView will still plot it, "
-            "but read these first:\n\n" + "\n\n".join(f"- {f}" for f in findings)
+            "**Hey — this file looks like it has more than one table in it.** "
+            "CraneView plots one table (one header row, then data rows), so "
+            "parts of this may not visualize. What I spotted:\n\n"
+            + "\n\n".join(f"- {f}" for f in findings)
         )
-        with st.expander("What is tidy data?"):
-            st.markdown(TIDY_EXPLAINER)
+        with st.expander("What CraneView needs"):
+            st.markdown(STRUCTURE_EXPLAINER)
     summary_rows = [
         {
             "Visualize": checks.get(s.name, True),

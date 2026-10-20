@@ -35,10 +35,11 @@ data-entry errors actually look, and they're what this tool is for.
 - **Sane limits for huge files**: at most 24 variables are plotted at
   once (a 1,024-column file gets its first 24 pre-checked, and checking
   more just swaps which 24 show).
-- **A tidy-data check**: if the file doesn't look tidy in Hadley
-  Wickham's sense — columns named like values (years, dates), repeated
-  measures spread across headers, unnamed or duplicated columns — a
-  warning says what looks off and what tidy data means.
+- **A structure check**: deliberately generous — dumb headers, wide
+  files, and untidy-but-single tables all pass. It only warns about
+  files holding more than one table (a second table stacked under the
+  first, a side table in mostly-empty columns, totals rows), which is
+  the shape that can't be paneled at all.
 - **Click a point, see its row**: clicking any point in the plot shows
   that row's full record below the chart, with Prev/Next buttons to
   walk the rows around a suspicious value.
