@@ -15,7 +15,9 @@ Run locally:  streamlit run app.py
 
 from __future__ import annotations
 
+import csv
 import math
+from html import escape
 from pathlib import Path
 
 import numpy as np
@@ -79,10 +81,19 @@ CAT_HALF_HEIGHT = 0.5
 CAT_PITCH = (2 * CAT_HALF_HEIGHT) / 3  # lane spacing = band height / 3
 CAT_FILL_ALPHA = 0.8
 
-# Category lane labels are spread over this fraction of the panel
-# height (centered), so the top and bottom labels keep clear of the
-# panels above and below.
-LABEL_SPREAD = 0.7
+# The Type dropdown shows capitalized labels, but internal kind
+# strings stay lowercase everywhere else — detection, summaries and
+# plotting all compare against them, so translating only at the
+# editor boundary (labels in, kinds out) keeps a capitalization
+# change from breaking comparisons scattered through the code.
+KIND_LABELS = {
+    "numeric": "Numeric",
+    "log numeric": "Log Numeric",
+    "categorical": "Categorical",
+    "datetime": "Datetime",
+    "text": "Text",
+}
+LABEL_TO_KIND = {label: kind for kind, label in KIND_LABELS.items()}
 
 SAMPLES = {
     "Messy plants (100 rows, planted errors)": "messy_plants.csv",
@@ -124,15 +135,27 @@ headers, mixed types. That's the data this tool is for.
 
 
 def read_csv(file) -> pd.DataFrame:
-    """Read an uploaded CSV, falling back to latin-1 for older exports."""
+    """Read an uploaded delimited file (comma, tab, semicolon, pipe).
+
+    The delimiter is sniffed from the first lines, so tab-delimited
+    exports (a spreadsheet default) load as real columns instead of
+    one wide text column; the parse itself uses the fast engine.
+    Falls back to latin-1 for older exports that aren't UTF-8.
+    """
+    sample = file.read(8192).decode("utf-8", errors="replace")
+    file.seek(0)
     try:
-        return pd.read_csv(file)
+        sep = csv.Sniffer().sniff(sample, delimiters=[",", "\t", ";", "|"]).delimiter
+    except csv.Error:
+        sep = ","
+    try:
+        return pd.read_csv(file, sep=sep)
     except UnicodeDecodeError:
         file.seek(0)
-        return pd.read_csv(file, encoding="latin-1")
+        return pd.read_csv(file, sep=sep, encoding="latin-1")
 
 
-uploaded = st.file_uploader("Upload a CSV", type=["csv"])
+uploaded = st.file_uploader("Upload a CSV or TSV", type=["csv", "tsv", "txt"])
 sample_choice = st.selectbox("Or try a sample dataset", ["(none)", *SAMPLES])
 
 df: pd.DataFrame | None = None
@@ -181,7 +204,7 @@ def _rgba(color: str, alpha: float) -> str:
 
 def add_categorical_panel(
     fig: go.Figure, row: int, series: pd.Series, x_all: np.ndarray, palette: list[str]
-) -> None:
+) -> list[dict]:
     """Draw a categorical variable as touching rectangles — a train.
 
     One rectangle per *run* of consecutive rows sharing a category, in
@@ -190,6 +213,9 @@ def add_categorical_panel(
     reads as one solid segment; a one-row typo is a single narrow car
     alone in its lane. Run-length encoding also keeps the shape count
     tiny compared to one rectangle per row.
+
+    Returns the rectangles as plain dicts; build_figure attaches them
+    to the figure in one go (see _attach_shapes for why).
     """
     categories = list(pd.unique(series.dropna()))
     codes = {cat: i for i, cat in enumerate(categories)}
@@ -218,26 +244,26 @@ def add_categorical_panel(
         run_start = i
 
     # Paint order keeps the layering consistent instead of depending
-    # on which run happens to come first in the data. NOTE: shapes are
-    # collected and assigned in ONE batch below — calling add_shape()
-    # per run is quadratic in plotly (each call revalidates the whole
-    # layout), which hangs on a few thousand runs; one assignment of
-    # the full tuple is near-instant.
+    # on which run happens to come first in the data. The rectangles
+    # are returned as plain dicts, NOT assigned to the figure here:
+    # plotly validates every shape on assignment (~1 ms each), so
+    # assigning per panel re-validated the growing list every time —
+    # quadratic, minutes on a few thousand runs. build_figure
+    # attaches the full set once, at the end.
     new_shapes = [
-        go.layout.Shape(
-            type="rect",
-            x0=left,
-            x1=right,
-            y0=code * CAT_PITCH - CAT_HALF_HEIGHT,
-            y1=code * CAT_PITCH + CAT_HALF_HEIGHT,
-            fillcolor=_rgba(palette[code % len(palette)], CAT_FILL_ALPHA),
-            line_width=0,
-            xref=xref,
-            yref=yref,
-        )
+        {
+            "type": "rect",
+            "x0": left,
+            "x1": right,
+            "y0": code * CAT_PITCH - CAT_HALF_HEIGHT,
+            "y1": code * CAT_PITCH + CAT_HALF_HEIGHT,
+            "fillcolor": _rgba(palette[code % len(palette)], CAT_FILL_ALPHA),
+            "line": {"width": 0},
+            "xref": xref,
+            "yref": yref,
+        }
         for code, left, right in sorted(runs)
     ]
-    fig.layout.shapes = tuple(fig.layout.shapes) + tuple(new_shapes)
 
     # Shapes can't hover, so invisible points carry the hover text.
     fig.add_trace(
@@ -259,22 +285,26 @@ def add_categorical_panel(
     range_pad = max(0.05, (len(categories) + 2.1 - content_span) / 2)
     axis_lo = -CAT_HALF_HEIGHT - range_pad
     axis_hi = (len(categories) - 1) * CAT_PITCH + CAT_HALF_HEIGHT + range_pad
-    # Lane labels are spread over the middle of the panel's height
-    # instead of sitting at the (compressed) lane centers, where
-    # they'd print on top of each other; top-to-bottom order still
-    # matches the bands. They use the middle LABEL_SPREAD of the
-    # range so the end labels stay clear of the neighbouring panels.
-    # With many categories, label every Nth one and leave the rest
-    # to hover, which shows the full value.
-    label_lo = axis_lo + (1 - LABEL_SPREAD) / 2 * (axis_hi - axis_lo)
-    label_hi = axis_hi - (1 - LABEL_SPREAD) / 2 * (axis_hi - axis_lo)
+    # Lane labels are anchored to the bands' own span, widened by
+    # 60%, instead of sitting at the (compressed) lane centers, where
+    # they'd print on top of each other. Spreading them over the
+    # whole padded axis put few-category labels (North/South) far
+    # from their bands; this is the middle ground. Top-to-bottom
+    # order still matches the bands. With many categories, label
+    # every Nth one and leave the rest to hover.
+    content_lo = -CAT_HALF_HEIGHT
+    label_center = content_lo + content_span / 2
+    label_half = 0.8 * content_span
+    label_lo, label_hi = label_center - label_half, label_center + label_half
     if len(categories) > 1:
         label_positions = [
             label_lo + i * (label_hi - label_lo) / (len(categories) - 1) for i in range(len(categories))
         ]
+        spacing_px = (label_hi - label_lo) / (len(categories) - 1) / (axis_hi - axis_lo) * PANEL_PX
+        label_stride = max(1, math.ceil(13 / spacing_px))
     else:
         label_positions = [(axis_lo + axis_hi) / 2]
-    label_stride = max(1, math.ceil(13 * max(len(categories) - 1, 1) / (LABEL_SPREAD * PANEL_PX)))
+        label_stride = 1
     shown = range(0, len(categories), label_stride)
     fig.update_yaxes(
         tickvals=[label_positions[i] for i in shown],
@@ -290,6 +320,7 @@ def add_categorical_panel(
     )
     # No x-axis line on categorical panels — the bands are the picture.
     fig.update_xaxes(showline=False, zeroline=False, ticks="", row=row, col=1)
+    return new_shapes
 
 
 def _has_text_wrapped_numbers(series: pd.Series) -> bool:
@@ -311,11 +342,14 @@ def add_panel(
     kind: str,
     x_all: np.ndarray,
     palette: list[str] | None = None,
-) -> None:
-    """Draw one variable into its subplot panel, styled by kind."""
+) -> list[dict]:
+    """Draw one variable into its subplot panel, styled by kind.
+
+    Returns the panel's band rectangles (categorical panels only;
+    every other kind returns an empty list).
+    """
     if kind == "categorical":
-        add_categorical_panel(fig, row, series, x_all, palette or OKABE_ITO)
-        return
+        return add_categorical_panel(fig, row, series, x_all, palette or OKABE_ITO)
 
     y = prepare_y(series, kind)
     frame = pd.DataFrame({"x": x_all, "y": y}).dropna()
@@ -352,6 +386,26 @@ def add_panel(
         # axis, so they don't draw — the summary table still counts
         # them (min/mean/median are computed on the raw values).
         fig.update_yaxes(type="log", row=row, col=1)
+    return []
+
+
+def _attach_shapes(fig: go.Figure, shapes: list[dict]) -> None:
+    """Attach every panel's band rectangles to the figure, unchecked.
+
+    Plotly validates each layout shape as it's assigned (~1 ms per
+    shape), and a chart can hold tens of thousands of run rectangles —
+    that validation is what made big files take minutes to draw. The
+    dicts built by add_categorical_panel are already exactly the JSON
+    plotly.js consumes, so they're stored directly; if a future
+    plotly moves the internals this relies on, fall back to the
+    ordinary (checked, slower) assignment.
+    """
+    if not shapes:
+        return
+    try:
+        fig.layout._props["shapes"] = shapes
+    except AttributeError:
+        fig.layout.shapes = tuple(go.layout.Shape(**shape) for shape in shapes)
 
 
 def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure:
@@ -364,12 +418,13 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         vertical_spacing=min(0.12 / len(selected), 0.01),
     )
     cat_number = 0  # which categorical variable this is (for palettes)
+    all_shapes: list[dict] = []  # every panel's band rectangles
     for i, (name, kind) in enumerate(selected, start=1):
         palette = None
         if kind == "categorical":
             palette = PALETTE_FAMILIES[cat_number % len(PALETTE_FAMILIES)]
             cat_number += 1
-        add_panel(fig, i, df[name], kind, x_all, palette)
+        all_shapes.extend(add_panel(fig, i, df[name], kind, x_all, palette))
         # Variable names are horizontal label chips pinned to each
         # panel's top-left corner. (Plotly y-axis titles are always
         # rotated vertical, and at this panel height neighbouring
@@ -383,21 +438,28 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
             y=0.97,
             xanchor="left",
             yanchor="top",
-            text=truncate_label(label, 48),
+            text=f"<b>{escape(truncate_label(label, 48))}</b>",
             showarrow=False,
-            font={"size": 11, "color": "#e5e7eb"},
+            font={"size": 13, "color": "#e5e7eb"},
             bgcolor="rgba(14,17,23,0.65)",
             borderpad=2,
         )
     fig.update_xaxes(title_text="index", row=len(selected), col=1)
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(showgrid=False)
+    # At most ~5 y ticks per panel: denser than that, the labels
+    # collide (a datetime panel crowds a whole season into 78px).
+    # Explicit categorical tick values ignore nticks.
+    fig.update_yaxes(nticks=5)
+    # The index axis is bounded to the data: it starts at row 0 and
+    # ends at the last row — never negative, never padded past the
+    # end. (The range slider below clamps its own travel the same
+    # way, so the window can't be dragged into negative numbers.)
     if len(df) > INITIAL_WINDOW:
         # Open on the first window of rows; the range slider under the
         # bottom axis (plus dragging to pan, scroll to zoom) travels
         # the rest. The axes are shared, so every panel moves together.
-        for i in range(1, len(selected) + 1):
-            fig.update_xaxes(range=[-0.5, INITIAL_WINDOW - 0.5], row=i, col=1)
+        fig.update_xaxes(range=[0, INITIAL_WINDOW - 1])
         fig.update_xaxes(
             rangeslider={
                 "visible": True,
@@ -417,6 +479,8 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
             row=len(selected),
             col=1,
         )
+    else:
+        fig.update_xaxes(range=[0, len(df) - 1])
     fig.update_layout(
         height=max(PANEL_PX * len(selected) + 60, 280),
         showlegend=False,
@@ -426,6 +490,8 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         clickmode="event+select",
         margin={"l": 70, "r": 10, "t": 12, "b": 40},
     )
+    # Last step, so nothing else has to touch the layout afterwards.
+    _attach_shapes(fig, all_shapes)
     return fig
 
 
@@ -459,12 +525,30 @@ def _clear_focus() -> None:
     st.session_state["focus_row"] = None
 
 
+@st.cache_data(show_spinner=False)
+def _cached_analyze(df: pd.DataFrame, kinds_key: tuple) -> list:
+    """analyze(), cached on the data itself.
+
+    Summarizing scans every column, and Streamlit reruns the whole
+    script on every checkbox tick and chart click — caching on the
+    frame's content makes repeat runs skip the scan. The kinds dict
+    travels as a sorted tuple because dicts aren't hashable.
+    """
+    return analyze(df, dict(kinds_key) if kinds_key else None)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_structure_findings(df: pd.DataFrame) -> list[str]:
+    """structure_findings(), cached on the data (see _cached_analyze)."""
+    return structure_findings(df)
+
+
 if df is not None and dataset_id is not None:
     # Per-dataset UI state: effective kinds (user-overridable) and which
     # variables are checked for plotting. Reset when the dataset changes.
     if st.session_state.get("dataset_id") != dataset_id:
         st.session_state["dataset_id"] = dataset_id
-        st.session_state["kinds"] = {s.name: s.kind for s in analyze(df)}
+        st.session_state["kinds"] = {s.name: s.kind for s in _cached_analyze(df, ())}
         st.session_state["checks"] = {
             str(col): i < MAX_PLOTTED_VARIABLES for i, col in enumerate(df.columns)
         }
@@ -478,11 +562,11 @@ if df is not None and dataset_id is not None:
     # get merged/renamed between releases); anything no longer on the
     # menu falls back to the detected kind instead of breaking the
     # editor's dropdown.
-    detected_kinds = {s.name: s.kind for s in analyze(df)}
+    detected_kinds = {s.name: s.kind for s in _cached_analyze(df, ())}
     kinds = {name: (k if k in KINDS else detected_kinds[name]) for name, k in kinds.items()}
 
     st.caption(f"{len(df):,} rows × {len(df.columns)} columns")
-    findings = structure_findings(df)
+    findings = _cached_structure_findings(df)
     if findings:
         st.warning(
             "**Hey — this file looks like it has more than one table in it.** "
@@ -496,12 +580,12 @@ if df is not None and dataset_id is not None:
         {
             "Visualize": checks.get(s.name, True),
             "Variable": s.name,
-            "Type": s.kind,
+            "Type": KIND_LABELS[s.kind],
             "Missing": f"{s.n_missing} ({s.pct_missing}%)",
             "Unique": s.n_unique,
             "Summary": format_details(s),
         }
-        for s in analyze(df, kinds)
+        for s in _cached_analyze(df, tuple(sorted(kinds.items())))
     ]
     edited = st.data_editor(
         pd.DataFrame(summary_rows),
@@ -517,7 +601,7 @@ if df is not None and dataset_id is not None:
                 # shows the dropdown arrow once a cell is clicked — at
                 # rest, nothing marks the column as a dropdown.
                 "Type ▾",
-                options=list(KINDS),
+                options=list(KIND_LABELS.values()),
                 required=True,
                 width=145,
             ),
@@ -528,7 +612,12 @@ if df is not None and dataset_id is not None:
         },
     )
 
-    new_kinds = dict(zip(edited["Variable"], edited["Type"]))
+    # Editor labels translate back to internal kinds here — the only
+    # place besides summary_rows where the two vocabularies meet.
+    new_kinds = {
+        name: LABEL_TO_KIND.get(label, kinds.get(name, "text"))
+        for name, label in zip(edited["Variable"], edited["Type"])
+    }
     new_checks = dict(zip(edited["Variable"], edited["Visualize"]))
     st.session_state["checks"] = new_checks
     if new_kinds != kinds:

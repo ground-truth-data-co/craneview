@@ -84,10 +84,12 @@ def _mostly_dates(non_null: pd.Series) -> bool:
     """True if >= DATETIME_PARSE_THRESHOLD of the values parse as dates."""
     # Only attempt the parse on columns that look date-ish; this keeps
     # plain numbers-as-strings ("1042", "8871") from becoming datetimes.
+    # The probe is capped at 1,000 values: parsing a whole long column
+    # just to classify it is the slowest thing detection does.
     sample = non_null.astype(str).head(200)
     if not sample.str.contains(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}", regex=True).any():
         return False
-    parsed = pd.to_datetime(non_null, errors="coerce", format="mixed")
+    parsed = pd.to_datetime(non_null.head(1000), errors="coerce", format="mixed")
     return parsed.notna().mean() >= DATETIME_PARSE_THRESHOLD
 
 
