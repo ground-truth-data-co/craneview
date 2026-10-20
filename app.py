@@ -24,7 +24,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from craneview_core import KINDS, analyze, as_datetime, format_details
+from craneview_core import KINDS, analyze, as_datetime, format_details, truncate_label
 
 # Qualitative palette for categories: Okabe-Ito, designed so that
 # neighboring categories stay distinguishable (and colorblind-safe).
@@ -37,6 +37,18 @@ CATEGORY_COLORS = OKABE_ITO + [c for c in plotly.colors.qualitative.Safe if c no
 # Above this many rows, plots draw a stride sample so the browser stays
 # responsive. Summaries always use the full data; only the dots thin out.
 MAX_PLOT_POINTS = 20_000
+
+# Datasets longer than this open zoomed to the first INITIAL_WINDOW
+# rows, with a range slider + panning to travel the rest — 20,000 rows
+# squeezed into one screen width is not QA, it's wallpaper.
+INITIAL_WINDOW = 500
+
+# Categorical bands are 3 lane-heights tall (half-height 1.5 around the
+# lane center), so each band overlaps its neighbours by 2/3 of its
+# height. The fill is translucent so overlapped bands blend instead of
+# the top one hiding the ones beneath.
+CAT_HALF_HEIGHT = 1.5
+CAT_FILL_ALPHA = 0.8
 
 SAMPLES = {
     "Messy plants (100 rows, planted errors)": "messy_plants.csv",
@@ -91,6 +103,12 @@ def _axis_ref(axis: str, row: int) -> str:
     return axis if row == 1 else f"{axis}{row}"
 
 
+def _rgba(hex_color: str, alpha: float) -> str:
+    """'#E69F00' at 0.8 -> 'rgba(230,159,0,0.8)' for translucent fills."""
+    r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def add_categorical_panel(fig: go.Figure, row: int, series: pd.Series, x_all: np.ndarray) -> None:
     """Draw a categorical variable as touching rectangles — a train.
 
@@ -110,11 +128,12 @@ def add_categorical_panel(fig: go.Figure, row: int, series: pd.Series, x_all: np
     cats = frame["cat"].to_numpy()
     xref, yref = _axis_ref("x", row), _axis_ref("y", row)
 
+    # Collect the runs first; they are painted lane by lane below.
+    runs: list[tuple[int, float, float]] = []  # (lane code, left, right)
     run_start = 0
     for i in range(1, len(cats) + 1):
         if i < len(cats) and cats[i] == cats[run_start]:
             continue  # the run is still going
-        code = codes[cats[run_start]]
         if run_start > 0:
             left = xs[run_start] - (xs[run_start] - xs[run_start - 1]) / 2
         else:
@@ -123,18 +142,30 @@ def add_categorical_panel(fig: go.Figure, row: int, series: pd.Series, x_all: np
             right = xs[i - 1] + (xs[i] - xs[i - 1]) / 2
         else:
             right = xs[i - 1] + 0.5
-        fig.add_shape(
+        runs.append((codes[cats[run_start]], float(left), float(right)))
+        run_start = i
+
+    # Paint order keeps the layering consistent instead of depending
+    # on which run happens to come first in the data. NOTE: shapes are
+    # collected and assigned in ONE batch below — calling add_shape()
+    # per run is quadratic in plotly (each call revalidates the whole
+    # layout), which hangs on a few thousand runs; one assignment of
+    # the full tuple is near-instant.
+    new_shapes = [
+        go.layout.Shape(
             type="rect",
             x0=left,
             x1=right,
-            y0=code - 0.42,
-            y1=code + 0.42,
-            fillcolor=CATEGORY_COLORS[code % len(CATEGORY_COLORS)],
+            y0=code - CAT_HALF_HEIGHT,
+            y1=code + CAT_HALF_HEIGHT,
+            fillcolor=_rgba(CATEGORY_COLORS[code % len(CATEGORY_COLORS)], CAT_FILL_ALPHA),
             line_width=0,
             xref=xref,
             yref=yref,
         )
-        run_start = i
+        for code, left, right in sorted(runs)
+    ]
+    fig.layout.shapes = tuple(fig.layout.shapes) + tuple(new_shapes)
 
     # Shapes can't hover, so invisible points carry the hover text.
     fig.add_trace(
@@ -151,10 +182,17 @@ def add_categorical_panel(fig: go.Figure, row: int, series: pd.Series, x_all: np
     )
     fig.update_yaxes(
         tickvals=list(codes.values()),
-        ticktext=[str(c) for c in categories],
+        # Axis labels are truncated (the full value is on hover): one
+        # pasted-paragraph category would otherwise shove the whole
+        # plot to the right.
+        ticktext=[truncate_label(str(c)) for c in categories],
+        # Pad the range so the tall first/last bands aren't clipped.
+        range=[-CAT_HALF_HEIGHT - 0.2, len(categories) - 1 + CAT_HALF_HEIGHT + 0.2],
         row=row,
         col=1,
     )
+    # No x-axis line on categorical panels — the bands are the picture.
+    fig.update_xaxes(showline=False, zeroline=False, row=row, col=1)
 
 
 def add_panel(fig: go.Figure, row: int, series: pd.Series, kind: str, x_all: np.ndarray) -> None:
@@ -188,8 +226,6 @@ def add_panel(fig: go.Figure, row: int, series: pd.Series, kind: str, x_all: np.
         row=row,
         col=1,
     )
-    if kind == "text":
-        fig.update_yaxes(title_text="length", row=row, col=1)
 
 
 def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure:
@@ -199,18 +235,29 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         rows=len(selected),
         cols=1,
         shared_xaxes=True,
-        subplot_titles=[name for name, _ in selected],
         vertical_spacing=min(0.35 / len(selected), 0.08),
     )
     for i, (name, kind) in enumerate(selected, start=1):
         add_panel(fig, i, df[name], kind, x_all)
+        # Variable names label the left side (the y-axis title), not the
+        # top of each panel. Text plots get a hint that y is length.
+        label = f"{name} (length)" if kind == "text" else name
+        fig.update_yaxes(title_text=label, row=i, col=1)
     fig.update_xaxes(title_text="index", row=len(selected), col=1)
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(showgrid=False)
+    if len(df) > INITIAL_WINDOW:
+        # Open on the first window of rows; the range slider under the
+        # bottom axis (plus dragging to pan, scroll to zoom) travels
+        # the rest. The axes are shared, so every panel moves together.
+        for i in range(1, len(selected) + 1):
+            fig.update_xaxes(range=[-0.5, INITIAL_WINDOW - 0.5], row=i, col=1)
+        fig.update_xaxes(rangeslider_visible=True, row=len(selected), col=1)
     fig.update_layout(
         height=max(180 * len(selected) + 80, 320),
         showlegend=False,
-        margin={"l": 50, "r": 10, "t": 40, "b": 40},
+        dragmode="pan",
+        margin={"l": 70, "r": 10, "t": 20, "b": 40},
     )
     return fig
 
@@ -273,7 +320,7 @@ if df is not None and dataset_id is not None:
     if selected:
         st.plotly_chart(
             build_figure(df, selected),
-            config={"displaylogo": False, "responsive": True},
+            config={"displaylogo": False, "responsive": True, "scrollZoom": True},
         )
     else:
         st.caption("No variables selected.")

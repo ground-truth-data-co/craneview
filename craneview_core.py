@@ -181,7 +181,7 @@ def format_details(summary: ColumnSummary) -> str:
         )
     if summary.kind == "categorical":
         top = d.get("top_values", {})
-        line = " · ".join(f"{_truncate(value)} {count}" for value, count in top.items())
+        line = " · ".join(f"{truncate_label(value)} {count}" for value, count in top.items())
         extra = summary.n_unique - len(top)
         return f"{line} · +{extra} more" if extra > 0 else line
     if summary.kind == "datetime":
@@ -196,7 +196,8 @@ def _format_number(value: float | None) -> str:
     return f"{value:,.4g}"
 
 
-def _truncate(text: str, limit: int = 28) -> str:
+def truncate_label(text: str, limit: int = 28) -> str:
     """Cap a category label so one pasted-paragraph value can't blow
-    out the summary table's width."""
+    out a table cell or shove a plot sideways as an axis tick label.
+    The full value still shows on hover."""
     return text if len(text) <= limit else text[: limit - 1] + "…"
