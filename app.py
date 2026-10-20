@@ -103,9 +103,17 @@ def _axis_ref(axis: str, row: int) -> str:
     return axis if row == 1 else f"{axis}{row}"
 
 
-def _rgba(hex_color: str, alpha: float) -> str:
-    """'#E69F00' at 0.8 -> 'rgba(230,159,0,0.8)' for translucent fills."""
-    r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+def _rgba(color: str, alpha: float) -> str:
+    """Add an alpha channel to a Plotly color.
+
+    Palette colors arrive in two formats — '#E69F00' (hand-written and
+    some Plotly palettes) and 'rgb(230,159,0)' (other Plotly palettes,
+    e.g. qualitative Safe) — so parse whichever shows up.
+    """
+    if color.startswith("#"):
+        r, g, b = (int(color[i : i + 2], 16) for i in (1, 3, 5))
+    else:  # 'rgb(r, g, b)'
+        r, g, b = (int(part) for part in color[color.index("(") + 1 : color.index(")")].split(","))
     return f"rgba({r},{g},{b},{alpha})"
 
 
@@ -296,7 +304,13 @@ if df is not None and dataset_id is not None:
             "Visualize": st.column_config.CheckboxColumn("Visualize", width=85),
             "Variable": st.column_config.TextColumn("Variable", width=180),
             "Type": st.column_config.SelectboxColumn(
-                "Type", options=list(KINDS), required=True, width=130
+                # The ▾ is in the label because Streamlit's editor only
+                # shows the dropdown arrow once a cell is clicked — at
+                # rest, nothing marks the column as a dropdown.
+                "Type ▾",
+                options=list(KINDS),
+                required=True,
+                width=130,
             ),
             "Missing": st.column_config.TextColumn("Missing", width=105),
             "Unique": st.column_config.NumberColumn("Unique", width=75),
