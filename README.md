@@ -17,18 +17,23 @@ data-entry errors actually look, and they're what this tool is for.
   values for categorical, date range for datetime, length range for text).
 - **The data type is a dropdown in that table.** Detection is a heuristic
   (numeric / categorical / datetime / text); override any column whose
-  type it got wrong and the summary and plot update to match.
+  type it got wrong and the summary and plot update to match. Two extra
+  types are override-only: **log numeric** (same numbers on a log-scale
+  axis) and **stripped numeric** (pulls the first number out of text
+  values, so `PLT-1042` or `12.5 kg` plots as a number).
 - **A checkbox per variable** picks which ones are plotted.
 - **One stacked plot**: selected variables get one panel each, stacked
   over a shared row-index axis (0, 1, 2, 3, …). Numeric and datetime
   panels plot the value against row number, colored by value on the
   viridis scale; categorical panels draw one lane per category filled
-  with touching rectangles — one per run of consecutive rows — in an
-  Okabe-Ito qualitative palette (a typo'd level like `f` vs `F` gets its
-  own lane, color, and visibly tiny train car); text panels plot string
-  length, since the text itself can't be a y-axis.
+  with touching rectangles — one per run of consecutive rows — in a
+  qualitative palette (a different palette family per variable; a
+  typo'd level like `f` vs `F` gets its own lane, color, and visibly
+  tiny train car); text panels plot string length, since the text
+  itself can't be a y-axis.
 - **Bundled samples** if you have no file handy: a 100-row plant dataset
-  with planted entry errors, plus iris and the classic mpg cars data.
+  with planted entry errors, iris, the classic mpg cars data, and a
+  2,000-row field trial.
 
 Your file is processed in memory for the session only. Nothing is stored.
 

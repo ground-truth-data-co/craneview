@@ -14,6 +14,7 @@ column gets and compute the combined summary table.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -39,7 +40,7 @@ class ColumnSummary:
     """Everything the UI needs to show for one column."""
 
     name: str
-    kind: str  # "numeric" | "categorical" | "datetime" | "text"
+    kind: str  # one of KINDS (craneview_core.KINDS)
     n: int
     n_missing: int
     pct_missing: float
@@ -96,7 +97,37 @@ def as_datetime(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce", format="mixed")
 
 
-KINDS = ("numeric", "categorical", "datetime", "text")
+KINDS = ("numeric", "log numeric", "stripped numeric", "categorical", "datetime", "text")
+
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _first_number(value: object) -> float:
+    """The first number inside a text value ('PLT-1042' -> 1042.0).
+
+    A '-' glued to a letter is a separator, not a minus sign, so
+    'PLT-1042' is 1042 while '-3.5 C' and 'temp -3.5' stay negative.
+    Thousands separators are ignored ('1,042' -> 1042).
+    """
+    text = str(value).replace(",", "")
+    match = _NUMBER_RE.search(text)
+    if match is None:
+        return float("nan")
+    found = match.group()
+    if found.startswith("-") and match.start() > 0 and text[match.start() - 1].isalpha():
+        found = found[1:]
+    return float(found)
+
+
+def extract_numbers(series: pd.Series) -> pd.Series:
+    """Pull the first number out of each value of a text column.
+
+    Backs the 'stripped numeric' type: a column like 'PLT-1042',
+    '12.5 kg', 'P07' becomes the numbers inside it. Values with no
+    number become NaN — they don't plot, and the gap is visible, the
+    same contract as the other coercions.
+    """
+    return series.map(_first_number)
 
 
 def summarize(series: pd.Series, kind: str | None = None) -> ColumnSummary:
@@ -122,8 +153,13 @@ def summarize(series: pd.Series, kind: str | None = None) -> ColumnSummary:
     )
 
     non_null = series.dropna()
-    if kind == "numeric":
-        values = pd.to_numeric(non_null, errors="coerce").dropna()
+    if kind in ("numeric", "log numeric", "stripped numeric"):
+        raw = (
+            extract_numbers(non_null)
+            if kind == "stripped numeric"
+            else pd.to_numeric(non_null, errors="coerce")
+        )
+        values = raw.dropna()
         summary.details = {
             "min": _clean_number(values.min()),
             "max": _clean_number(values.max()),
@@ -174,7 +210,7 @@ def format_details(summary: ColumnSummary) -> str:
     datetime, a length range for text.
     """
     d = summary.details
-    if summary.kind == "numeric":
+    if summary.kind in ("numeric", "log numeric", "stripped numeric"):
         return " · ".join(
             f"{label} {_format_number(d.get(key))}"
             for label, key in (("min", "min"), ("max", "max"), ("mean", "mean"), ("median", "median"))

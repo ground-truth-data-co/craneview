@@ -24,7 +24,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from craneview_core import KINDS, analyze, as_datetime, format_details, truncate_label
+from craneview_core import KINDS, analyze, as_datetime, extract_numbers, format_details, truncate_label
 
 # Qualitative palette for categories: Okabe-Ito, designed so that
 # neighboring categories stay distinguishable (and colorblind-safe).
@@ -55,19 +55,18 @@ MAX_PLOT_POINTS = 20_000
 # squeezed into one screen width is not QA, it's wallpaper.
 INITIAL_WINDOW = 500
 
-# Categorical bands are 1.5 lane-heights tall (half-height 0.75 around
-# the lane center), so each band overlaps its neighbours by 1/3 of its
-# height — enough to read as a woven strip, not so much that the
-# middle lanes' solid cores shrink to slivers next to the end lanes'.
-# The fill is translucent so overlapped bands blend instead of the
-# top one hiding the ones beneath.
-CAT_HALF_HEIGHT = 0.75
+# Categorical bands are 1.1 lane-heights tall (half-height 0.55 around
+# the lane center): just a sliver of overlap where neighbouring bands
+# meet. The fill is translucent so overlapped bands blend instead of
+# the top one hiding the ones beneath.
+CAT_HALF_HEIGHT = 0.55
 CAT_FILL_ALPHA = 0.8
 
 SAMPLES = {
     "Messy plants (100 rows, planted errors)": "messy_plants.csv",
     "Iris (150 rows)": "iris.csv",
     "Cars — mpg (398 rows)": "mpg.csv",
+    "Field trial (2,000 rows)": "field_trial_2000.csv",
 }
 SAMPLES_DIR = Path(__file__).parent / "samples"
 
@@ -103,8 +102,10 @@ def prepare_y(series: pd.Series, kind: str) -> pd.Series:
     Bad values become NaN/NaT and simply don't draw — their absence at
     their row position is itself visible in the plot.
     """
-    if kind == "numeric":
+    if kind in ("numeric", "log numeric"):
         return pd.to_numeric(series, errors="coerce")
+    if kind == "stripped numeric":
+        return extract_numbers(series)
     if kind == "datetime":
         return as_datetime(series)
     if kind == "text":
@@ -210,8 +211,8 @@ def add_categorical_panel(
         # pasted-paragraph category would otherwise shove the whole
         # plot to the right.
         ticktext=[truncate_label(str(c)) for c in categories],
-        # Pad the range so the first/last bands aren't clipped.
-        range=[-CAT_HALF_HEIGHT - 0.15, len(categories) - 1 + CAT_HALF_HEIGHT + 0.15],
+        # Pad the range slightly so the first/last bands aren't clipped.
+        range=[-CAT_HALF_HEIGHT - 0.05, len(categories) - 1 + CAT_HALF_HEIGHT + 0.05],
         # No horizontal line through the first lane (the y=0 zeroline).
         zeroline=False,
         row=row,
@@ -259,6 +260,11 @@ def add_panel(
         row=row,
         col=1,
     )
+    if kind == "log numeric":
+        # Log-scale y axis. Zero/negative values can't exist on a log
+        # axis, so they don't draw — the summary table still counts
+        # them (min/mean/median are computed on the raw values).
+        fig.update_yaxes(type="log", row=row, col=1)
 
 
 def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure:
@@ -268,7 +274,7 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
         rows=len(selected),
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=min(0.3 / len(selected), 0.04),
+        vertical_spacing=min(0.18 / len(selected), 0.022),
     )
     cat_number = 0  # which categorical variable this is (for palettes)
     for i, (name, kind) in enumerate(selected, start=1):
@@ -292,7 +298,7 @@ def build_figure(df: pd.DataFrame, selected: list[tuple[str, str]]) -> go.Figure
             fig.update_xaxes(range=[-0.5, INITIAL_WINDOW - 0.5], row=i, col=1)
         fig.update_xaxes(rangeslider_visible=True, row=len(selected), col=1)
     fig.update_layout(
-        height=max(105 * len(selected) + 60, 280),
+        height=max(92 * len(selected) + 60, 280),
         showlegend=False,
         dragmode="pan",
         margin={"l": 70, "r": 10, "t": 20, "b": 40},
@@ -340,7 +346,7 @@ if df is not None and dataset_id is not None:
                 "Type ▾",
                 options=list(KINDS),
                 required=True,
-                width=130,
+                width=145,
             ),
             "Missing": st.column_config.TextColumn("Missing", width=105),
             "Unique": st.column_config.NumberColumn("Unique", width=75),
